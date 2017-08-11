@@ -1,0 +1,29 @@
+
+# Source this file to enable Bash shell command-line completion for knife.
+
+_knife_options() {
+  $1 --help 2>&1 | sed -ne 's/.*\(--[-a-zA-Z0-9]\+\).*/\1/p' | sort -u
+}
+
+_knife_commands() {
+  local index
+  prev="$1"
+  index=$(($2 + 1))
+  knife --help 2>&1 | egrep "^$prev " | sed -ne 's/^\([ _a-z0-9]\+\).*/\1/p' | eval awk "'{print \$$index}'" | sort -u
+}
+
+_knife() {
+  cur=${COMP_WORDS[${COMP_CWORD}]}
+  prev=${COMP_WORDS[@]:0:$COMP_CWORD}
+  COMPREPLY=()
+  case $cur in
+    -*)
+      COMPREPLY=( $( compgen -W "$(_knife_options "$prev")" -- $cur ) )
+      ;;
+     *)
+      COMPREPLY=( $( compgen -W "$(_knife_commands "$prev" $COMP_CWORD)" -- $cur ) )
+      ;;
+  esac
+}
+
+complete -F _knife knife
