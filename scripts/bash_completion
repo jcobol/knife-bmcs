@@ -2,7 +2,11 @@
 # Source this file to enable Bash shell command-line completion for knife.
 
 _knife_options() {
-  $1 --help 2>&1 | sed -ne 's/.*\(--[-a-zA-Z0-9]\+\).*/\1/p' | sort -u
+  $1 --help 2>&1 | \
+    # strip all but the first option on a line
+    grep -oE -- '--[^ ]+' | \
+    # transform --[no-]option to --option and --no-option
+    sed -e 's/\(.*\)--\[no-\]\([-a-zA-Z0-9]*\)\(.*\)/\1--no-\2\3\n\1--\2\3/' | sort -u
 }
 
 _knife_commands() {
