@@ -37,12 +37,12 @@ def run_server_delete(param_hash, file)
   shell
 end
 
-def validate_output(shell, params)
+def validate_output(shell, params, chef_managed: true)
   expect(shell.stdout).to include(params['--availability-domain'])
   expect(shell.stdout).to include(params['--image-id'])
   expect(shell.stdout).to include('is now running')
   expect(shell.stdout).to include('Public IP Address:')
-  expect(shell.stdout).to include('Chef Client finished')
+  expect(shell.stdout).to include('Chef Client finished') if chef_managed
 end
 
 def validate_delete_output(shell, chef_node_name)
@@ -57,7 +57,8 @@ def delete_and_purge
   match = output.match("Instance ID:\s(.*)")
   return unless match && match.length > 1
   instance_id = match[1]
-  chef_node_name = output.match("Bootstrapping with node name '(.+)'")[1]
+  chef_node_name = output.match("Bootstrapping with node name '(.+)'")
+  chef_node_name = chef_node_name[1] if chef_node_name
   puts "Clean Up: Terminating instance #{instance_id}."
   yield instance_id, chef_node_name
 end
@@ -75,6 +76,19 @@ describe 'server create command' do
       '--ssh-authorized-keys-file' => public_ssh_key_file,
       '--identity-file' => private_key_file,
       '--ssh-user' => 'opc',
+      '--yes' => true
+    }
+  end
+
+  let(:min_windows_params) do
+    {
+      '--availability-domain' => availability_domain,
+      '--compartment-id' => compartment_id,
+      '--subnet-id' => subnet_id,
+      '--shape' => shape,
+      '--image-id' => 'Must be set for each run.',
+      '--bmcs-config-file' => config_file_path,
+      '--bmcs-profile' => profile,
       '--yes' => true
     }
   end
@@ -144,6 +158,20 @@ describe 'server create command' do
       params['--node-name'] = chef_node_name
       shell = run_server_delete(params, 'test_ubuntu_delete')
       validate_delete_output(shell, chef_node_name)
+    end
+  end
+
+  it 'can create a Microsoft Windows instance' do
+    params = min_windows_params
+    params['--image-id'] = windows_image_id
+    shell = run_server_create(params, 'test_windows')
+    validate_output(shell, params, chef_managed: false)
+    delete_and_purge do |instance_id|
+      # delete the instance using specified chef node name
+      params = min_delete_params
+      params['--instance-id'] = instance_id
+      shell = run_server_delete(params, 'test_windows_delete')
+      #validate_delete_output(shell, chef_node_name)
     end
   end
 end

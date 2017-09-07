@@ -45,6 +45,14 @@ class Chef
         exit(1)
       end
 
+      def ensure_params_not_specified(omit_params, params, message)
+        invalid_params = omit_params.reject do |param|
+          params[param].nil?
+        end
+
+        error_and_exit("#{message}: #{invalid_params.join(', ').tr('_', '-')}") unless invalid_params.empty?
+      end
+
       def validate_required_params(required_params, params)
         missing_params = required_params.select do |param|
           params[param].nil?

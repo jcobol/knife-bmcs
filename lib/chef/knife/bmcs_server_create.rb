@@ -6,9 +6,12 @@ require 'chef/knife/bmcs_common_options'
 
 # Port for SSH - might want to parameterize this in the future.
 SSH_PORT = 22
+RDP_PORT = 3389
 
-WAIT_FOR_SSH_INTERVAL_SECONDS = 2
-DEFAULT_WAIT_FOR_SSH_MAX_SECONDS = 180
+WAIT_FOR_READINESS_INTERVAL_SECONDS = 2
+WAIT_FOR_SSH_INTERVAL_SECONDS = WAIT_FOR_READINESS_INTERVAL_SECONDS
+DEFAULT_WAIT_FOR_READINESS_MAX_SECONDS = 180
+DEFAULT_WAIT_FOR_SSH_MAX_SECONDS = DEFAULT_WAIT_FOR_READINESS_MAX_SECONDS
 DEFAULT_WAIT_TO_STABILIZE_SECONDS = 40
 
 class Chef
@@ -65,7 +68,7 @@ class Chef
              description: 'A file containing one or more public SSH keys to be included in the ~/.ssh/authorized_keys file for the default user on the instance. '\
                           'Use a newline character to separate multiple keys. The SSH keys must be in the format necessary for the authorized_keys file. This parameter '\
                           "is a convenience wrapper around the 'ssh_authorized_keys' field of the --metadata parameter. Populating both values in the same call will result "\
-                          'in an error. For more info see documentation: https://docs.us-phoenix-1.oraclecloud.com/api/#/en/iaas/20160918/requests/LaunchInstanceDetails. (required)'
+                          'in an error. For more info see documentation: https://docs.us-phoenix-1.oraclecloud.com/api/#/en/iaas/20160918/requests/LaunchInstanceDetails.'
 
       option :subnet_id,
              long: '--subnet-id SUBNET',
@@ -91,7 +94,7 @@ class Chef
       option :identity_file,
              short: '-i FILE',
              long: '--identity-file IDENTITY_FILE',
-             description: 'The SSH identity file used for authentication. This must correspond to a public SSH key provided by --ssh-authorized-keys-file. (required)'
+             description: 'The SSH identity file used for authentication. This must correspond to a public SSH key provided by --ssh-authorized-keys-file.'
 
       option :chef_node_name,
              short: '-N NAME',
@@ -107,19 +110,45 @@ class Chef
 
       option :wait_to_stabilize,
              long: '--wait-to-stabilize SECONDS',
-             description: "Duration to pause after SSH becomes reachable. Default: #{DEFAULT_WAIT_TO_STABILIZE_SECONDS}"
+             description: "Duration to pause after the service port (SSH or RDP) becomes reachable. Default: #{DEFAULT_WAIT_TO_STABILIZE_SECONDS}"
+
+      option :wait_for_readiness_max,
+             long: '--wait-for-readiness-max SECONDS',
+             description: "The maximum time to wait for the service port (SSH or RDP) to become reachable. Default: #{DEFAULT_WAIT_FOR_READINESS_MAX_SECONDS}"
 
       option :wait_for_ssh_max,
              long: '--wait-for-ssh-max SECONDS',
-             description: "The maximum time to wait for SSH to become reachable. Default: #{DEFAULT_WAIT_FOR_SSH_MAX_SECONDS}"
+             description: "The maximum time to wait for SSH to become reachable. Deprecated: Use --wait-for-readiness-max instead.  Default: #{DEFAULT_WAIT_FOR_SSH_MAX_SECONDS}"
 
       def run
         $stdout.sync = true
-        validate_required_params(%i[availability_domain image_id shape subnet_id identity_file ssh_authorized_keys_file], config)
+        validate_required_params(%i[availability_domain image_id shape subnet_id], config)
+
+        # Handle deprecated wait_for_ssh_max option
+        if config[:wait_for_ssh_max]
+          config[:wait_for_readiness_max] = config[:wait_for_ssh_max] unless config[:wait_for_readiness_max]
+          ui.warn('--wait-for-ssh-max is deprecated. Please use --wait-for-readiness-max instead.')
+          config.delete(:wait_for_ssh_max)
+        end
         validate_wait_options
 
+        # validate identity_file and ssh_authorized_keys_file only if on a non-Windows platform
+        windows_platform = windows_image?(config[:image_id])
+
+        linux_only_required_params = %i[identity_file ssh_authorized_keys_file]
+        if windows_platform
+          ensure_params_not_specified(linux_only_required_params, config, 'These parameters do not apply to Microsoft Windows instances')
+        else
+          validate_required_params(linux_only_required_params, config)
+        end
+
+        # TODO: ensure metadata does not include ssh authorized keys if windows_platform
         metadata = merge_metadata
-        error_and_exit 'SSH authorized keys must be specified.' unless metadata['ssh_authorized_keys']
+        if windows_platform
+          error_and_exit 'SSH authorized keys must not be specified for Microsoft Windows instances' if metadata['ssh_authorized_keys']
+        else
+          error_and_exit 'SSH authorized keys must be specified.' unless metadata['ssh_authorized_keys']
+        end
 
         request = OracleBMC::Core::Models::LaunchInstanceDetails.new
         request.availability_domain = config[:availability_domain]
@@ -151,23 +180,38 @@ class Chef
         show_value('Public IP Address', vnic.public_ip)
         show_value('Private IP Address', vnic.private_ip)
 
-        unless wait_for_ssh(vnic.public_ip, SSH_PORT, WAIT_FOR_SSH_INTERVAL_SECONDS, config[:wait_for_ssh_max])
-          error_and_exit 'Timed out while waiting for SSH access.'
+        if windows_platform
+          # TODO: Wait on RDP until WinRM can be enabled via user data
+          print ui.color('Waiting for RDP access...', :magenta)
+          unless wait_for_port(vnic.public_ip, RDP_PORT, WAIT_FOR_READINESS_INTERVAL_SECONDS, config[:wait_for_readiness_max])
+            error_and_exit 'Timed out while waiting for RDP access.'
+          end
+        else
+          print ui.color('Waiting for SSH access...', :magenta)
+          unless wait_for_port(vnic.public_ip, SSH_PORT, WAIT_FOR_READINESS_INTERVAL_SECONDS, config[:wait_for_readiness_max])
+            error_and_exit 'Timed out while waiting for SSH access.'
+          end
         end
 
         wait_to_stabilize
 
-        config[:chef_node_name] = instance.display_name unless config[:chef_node_name]
+        config[:chef_node_name] = instance.display_name unless config[:chef_node_name]  ## TODO - do not do this for Windows
 
         ui.msg "Bootstrapping with node name '#{config[:chef_node_name]}'."
 
         # TODO: Consider adding a use_private_ip option.
-        bootstrap(vnic.public_ip)
+        bootstrap(vnic.public_ip) ## TODO - do not do this for Windows
 
         ui.msg "Created and bootstrapped node '#{config[:chef_node_name]}'."
         ui.msg "\n"
 
         display_server_info(config, instance, [vnic])
+      end
+
+      def windows_image?(image_id)
+        response = compute_client.get_image(image_id)
+        os = response.data.operating_system
+        os.downcase =~ /windows/ ? true : false
       end
 
       def bootstrap(name)
@@ -197,7 +241,7 @@ class Chef
 
       def validate_wait_options
         validate_wait_option(:wait_to_stabilize, DEFAULT_WAIT_TO_STABILIZE_SECONDS)
-        validate_wait_option(:wait_for_ssh_max, DEFAULT_WAIT_FOR_SSH_MAX_SECONDS)
+        validate_wait_option(:wait_for_readiness_max, DEFAULT_WAIT_FOR_READINESS_MAX_SECONDS)
       end
 
       def wait_to_stabilize
@@ -207,14 +251,12 @@ class Chef
         Kernel.sleep(config[:wait_to_stabilize])
       end
 
-      def wait_for_ssh(hostname, ssh_port, interval_seconds, max_time_seconds)
-        print ui.color('Waiting for ssh access...', :magenta)
-
+      def wait_for_port(hostname, port, interval_seconds, max_time_seconds)
         end_time = Time.now + max_time_seconds
 
         begin
           while Time.now < end_time
-            return true if can_ssh(hostname, ssh_port)
+            return true if can_connect(hostname, port)
 
             show_progress
             sleep interval_seconds
@@ -226,8 +268,8 @@ class Chef
         false
       end
 
-      def can_ssh(hostname, ssh_port)
-        socket = TCPSocket.new(hostname, ssh_port)
+      def can_connect(hostname, port)
+        socket = TCPSocket.new(hostname, port)
         # Wait up to 5 seconds.
         readable = IO.select([socket], nil, nil, 5)
         if readable

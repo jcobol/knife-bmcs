@@ -66,6 +66,11 @@ def ubuntu_image_id
   ENV['KNIFE_BMCS_UBUNTU_ID']
 end
 
+def windows_image_id
+  # Example value: ocid1.image.oc1.iad.aaaaaaaajlfsi5npxguvhad3v5d5lu7dc3zcylr2csfdexgd6kor3f6zeqeq
+  ENV['KNIFE_BMCS_WINDOWS_ID']
+end
+
 def public_ssh_key_file
   # Example value: ~/.keys/instance_keys.pub
   ENV['KNIFE_BMCS_PUBLIC_SSH_KEY_FILE']
@@ -90,7 +95,7 @@ end
 
 def write_command_to_file(subcommand, file, directory)
   command = "knife bmcs #{subcommand}"
-  shell = Mixlib::ShellOut.new(command)
+  shell = Mixlib::ShellOut.new(command, :timeout => 1800)
   shell.run_command
 
   output = command

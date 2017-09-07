@@ -29,7 +29,7 @@ describe Chef::Knife::BmcsServerCreate do
              hostname_label: 'myhostname')
     end
 
-    let(:min_config) do
+    let(:min_linux_config) do
       {
         availability_domain: 'ad1',
         compartment_id: 'compartmentA',
@@ -42,24 +42,102 @@ describe Chef::Knife::BmcsServerCreate do
       }
     end
 
-    it 'should list missing required params' do
-      expect(knife_bmcs_server_create.ui).to receive(:error).with('Missing the following required parameters: availability-domain, image-id, shape, subnet-id, identity-file, ssh-authorized-keys-file')
+    let(:linux_image) do
+      double(operating_system: 'CentOS')
+    end
+
+    let(:linux_image_response) do
+      double(data: linux_image,
+             headers: {})
+    end
+
+    let(:min_windows_config) do
+      {
+        availability_domain: 'ad1',
+        compartment_id: 'compartmentA',
+        image_id: 'myimage',
+        shape: 'round',
+        subnet_id: 'supersubnet',
+        bmcs_config_file: DUMMY_CONFIG_FILE
+      }
+    end
+
+    let(:windows_image) do
+      double(operating_system: 'Windows')
+    end
+
+    let(:windows_image_response) do
+      double(data: windows_image,
+             headers: {})
+    end
+
+    it 'should list missing required params for all platforms' do
+      expect(knife_bmcs_server_create.ui).to receive(:error).with('Missing the following required parameters: availability-domain, image-id, shape, subnet-id')
       expect { knife_bmcs_server_create.run }.to raise_error(SystemExit)
     end
 
-    it 'runs with minimal parameters' do
-      knife_bmcs_server_create.config = min_config
+    it 'should list missing required params for Linux' do
+      knife_bmcs_server_create.config = min_linux_config
+      knife_bmcs_server_create.config.delete(:ssh_authorized_keys_file)
+      knife_bmcs_server_create.config.delete(:identity_file)
+
+      allow(knife_bmcs_server_create.compute_client).to receive(:get_image).and_return(linux_image_response)
+      expect(knife_bmcs_server_create.ui).to receive(:error).with('Missing the following required parameters: identity-file, ssh-authorized-keys-file')
+      expect { knife_bmcs_server_create.run }.to raise_error(SystemExit)
+    end
+
+    it 'should not permit Linux-only params for Windows' do
+      knife_bmcs_server_create.config = min_linux_config
+
+      allow(knife_bmcs_server_create.compute_client).to receive(:get_image).and_return(windows_image_response)
+      expect(knife_bmcs_server_create.ui).to receive(:error).with('These parameters do not apply to Microsoft Windows instances: identity-file, ssh-authorized-keys-file')
+      expect { knife_bmcs_server_create.run }.to raise_error(SystemExit)
+    end
+
+    it 'runs with minimal parameters for Windows instance' do
+      knife_bmcs_server_create.config = min_windows_config
 
       allow(knife_bmcs_server_create.compute_client).to receive(:launch_instance).and_return(double(data: instance))
-      allow(knife_bmcs_server_create).to receive(:wait_for_ssh).and_return(true)
+      allow(knife_bmcs_server_create.compute_client).to receive(:get_image).and_return(windows_image_response)
+      allow(knife_bmcs_server_create).to receive(:wait_for_port).and_return(true)
       allow(knife_bmcs_server_create).to receive(:wait_for_instance_running).and_return(instance)
       allow(knife_bmcs_server_create).to receive(:get_vnic).and_return(vnic)
       allow(knife_bmcs_server_create).to receive(:wait_to_stabilize)
+      allow(knife_bmcs_server_create.ui).to receive(:color)
       expect(knife_bmcs_server_create).to receive(:bootstrap)
       expect(knife_bmcs_server_create.ui).to receive(:msg).at_least(10).times
       expect(knife_bmcs_server_create).to receive(:get_vnic).with('12345', 'compartmentA')
 
       knife_bmcs_server_create.run
+      expect(knife_bmcs_server_create.ui).to have_received(:color).with('Waiting for RDP access...', :magenta)
+    end
+
+    it 'runs with minimal parameters for Linux instance' do
+      knife_bmcs_server_create.config = min_linux_config
+
+      allow(knife_bmcs_server_create.compute_client).to receive(:launch_instance).and_return(double(data: instance))
+      allow(knife_bmcs_server_create.compute_client).to receive(:get_image).and_return(linux_image_response)
+      allow(knife_bmcs_server_create).to receive(:wait_for_port).and_return(true)
+      allow(knife_bmcs_server_create).to receive(:wait_for_instance_running).and_return(instance)
+      allow(knife_bmcs_server_create).to receive(:get_vnic).and_return(vnic)
+      allow(knife_bmcs_server_create).to receive(:wait_to_stabilize)
+      allow(knife_bmcs_server_create.ui).to receive(:color)
+      expect(knife_bmcs_server_create).to receive(:bootstrap)
+      expect(knife_bmcs_server_create.ui).to receive(:msg).at_least(10).times
+      expect(knife_bmcs_server_create).to receive(:get_vnic).with('12345', 'compartmentA')
+
+      knife_bmcs_server_create.run
+      expect(knife_bmcs_server_create.ui).to have_received(:color).with('Waiting for SSH access...', :magenta)
+    end
+
+    it 'should show error when ssh_authorized_keys metadata given for Windows image' do
+      knife_bmcs_server_create.config = min_windows_config
+      knife_bmcs_server_create.config[:metadata] = '{"user_data":"mydata", "ssh_authorized_keys":"mykeys"}'
+
+      allow(knife_bmcs_server_create.compute_client).to receive(:get_image).and_return(windows_image_response)
+      expect(knife_bmcs_server_create.ui).to receive(:error).with('SSH authorized keys must not be specified for Microsoft Windows instances')
+
+      expect { knife_bmcs_server_create.run }.to raise_error(SystemExit)
     end
 
     it 'should show error when file not found' do
@@ -74,34 +152,61 @@ describe Chef::Knife::BmcsServerCreate do
       end
     end
 
-    it 'should wait user specified durations for ssh and stabilize' do
-      knife_bmcs_server_create.config = min_config
+    it 'should wait user specified durations for ssh and stabilize using wait_for_ssh_max' do
+      knife_bmcs_server_create.config = min_linux_config
       knife_bmcs_server_create.config[:wait_to_stabilize] = 99
       knife_bmcs_server_create.config[:wait_for_ssh_max] = 188
 
       allow(knife_bmcs_server_create.compute_client).to receive(:launch_instance).and_return(double(data: instance))
-      allow(knife_bmcs_server_create).to receive(:wait_for_ssh).with(vnic.public_ip, 22, 2, 188).and_return(true)
+      allow(knife_bmcs_server_create.compute_client).to receive(:get_image).and_return(linux_image_response)
+      allow(knife_bmcs_server_create).to receive(:wait_for_port).with(vnic.public_ip, 22, 2, 188).and_return(true)
       allow(knife_bmcs_server_create).to receive(:wait_for_instance_running).and_return(instance)
       allow(knife_bmcs_server_create).to receive(:get_vnic).and_return(vnic)
+      allow(knife_bmcs_server_create.ui).to receive(:color)
       expect(Kernel).to receive(:sleep).with(99)
       expect(knife_bmcs_server_create).to receive(:bootstrap)
       expect(knife_bmcs_server_create.ui).to receive(:msg).at_least(10).times
+      expect(knife_bmcs_server_create.ui).to receive(:warn).with('--wait-for-ssh-max is deprecated. Please use --wait-for-readiness-max instead.')
 
       knife_bmcs_server_create.run
+      expect(knife_bmcs_server_create.ui).to have_received(:color).with('Waiting for SSH access...', :magenta)
+    end
+
+    it 'should wait user specified durations for ssh and stabilize using wait_for_readiness_max' do
+      knife_bmcs_server_create.config = min_linux_config
+      knife_bmcs_server_create.config[:wait_to_stabilize] = 99
+      knife_bmcs_server_create.config[:wait_for_readiness_max] = 188
+
+      allow(knife_bmcs_server_create.compute_client).to receive(:launch_instance).and_return(double(data: instance))
+      allow(knife_bmcs_server_create.compute_client).to receive(:get_image).and_return(linux_image_response)
+      allow(knife_bmcs_server_create).to receive(:wait_for_port).with(vnic.public_ip, 22, 2, 188).and_return(true)
+      allow(knife_bmcs_server_create).to receive(:wait_for_instance_running).and_return(instance)
+      allow(knife_bmcs_server_create).to receive(:get_vnic).and_return(vnic)
+      allow(knife_bmcs_server_create.ui).to receive(:color)
+      expect(Kernel).to receive(:sleep).with(99)
+      expect(knife_bmcs_server_create).to receive(:bootstrap)
+      expect(knife_bmcs_server_create.ui).to receive(:msg).at_least(10).times
+      expect(knife_bmcs_server_create.ui).to_not receive(:warn)
+
+      knife_bmcs_server_create.run
+      expect(knife_bmcs_server_create.ui).to have_received(:color).with('Waiting for SSH access...', :magenta)
     end
 
     it 'should wait default durations for ssh and stabilize' do
-      knife_bmcs_server_create.config = min_config
+      knife_bmcs_server_create.config = min_linux_config
 
       allow(knife_bmcs_server_create.compute_client).to receive(:launch_instance).and_return(double(data: instance))
-      allow(knife_bmcs_server_create).to receive(:wait_for_ssh).with(vnic.public_ip, 22, 2, 180).and_return(true)
+      allow(knife_bmcs_server_create.compute_client).to receive(:get_image).and_return(linux_image_response)
+      allow(knife_bmcs_server_create).to receive(:wait_for_port).with(vnic.public_ip, 22, 2, 180).and_return(true)
       allow(knife_bmcs_server_create).to receive(:wait_for_instance_running).and_return(instance)
       allow(knife_bmcs_server_create).to receive(:get_vnic).and_return(vnic)
+      allow(knife_bmcs_server_create.ui).to receive(:color)
       expect(Kernel).to receive(:sleep).with(40)
       expect(knife_bmcs_server_create).to receive(:bootstrap)
       expect(knife_bmcs_server_create.ui).to receive(:msg).at_least(10).times
 
       knife_bmcs_server_create.run
+      expect(knife_bmcs_server_create.ui).to have_received(:color).with('Waiting for SSH access...', :magenta)
     end
   end
 
@@ -139,19 +244,17 @@ describe Chef::Knife::BmcsServerCreate do
 
   describe 'wait_for_ssh' do
     it 'should return false on timeout' do
-      allow(knife_bmcs_server_create).to receive(:can_ssh).and_return(false)
+      allow(knife_bmcs_server_create).to receive(:can_connect).and_return(false)
       expect(knife_bmcs_server_create).to receive(:show_progress).at_least(10).times
-      expect(knife_bmcs_server_create.ui).to receive(:color).once.ordered.with('Waiting for ssh access...', :magenta)
       expect(knife_bmcs_server_create.ui).to receive(:color).once.ordered.with("done\n", :magenta)
-      expect(knife_bmcs_server_create.wait_for_ssh('111.111.111.111', 22, 0.01, 0.5)).to eq(false)
+      expect(knife_bmcs_server_create.wait_for_port('111.111.111.111', 22, 0.01, 0.5)).to eq(false)
     end
 
     it 'should return immediately on success' do
-      allow(knife_bmcs_server_create).to receive(:can_ssh).and_return(true)
+      allow(knife_bmcs_server_create).to receive(:can_connect).and_return(true)
       expect(knife_bmcs_server_create).to receive(:show_progress).exactly(0).times
-      expect(knife_bmcs_server_create.ui).to receive(:color).once.ordered.with('Waiting for ssh access...', :magenta)
       expect(knife_bmcs_server_create.ui).to receive(:color).once.ordered.with("done\n", :magenta)
-      expect(knife_bmcs_server_create.wait_for_ssh('111.111.111.111', 22, 0.01, 0.5)).to eq(true)
+      expect(knife_bmcs_server_create.wait_for_port('111.111.111.111', 22, 0.01, 0.5)).to eq(true)
     end
   end
 
